@@ -1,6 +1,6 @@
 # MaiBot 点歌插件
 
-高性能低耦合的点歌插件，支持多音源、多种发送模式。
+轻量化的点歌插件，支持多音源、多种发送模式。
 
 ## 功能特性
 
@@ -128,5 +128,5 @@ MIT License
 
 ## 致谢
 
-原 AstrBot 版本插件: [astrbot_plugin_music](https://github.com/Zhalslar/astrbot_plugin_music)
+原 AstrBot 版本插件: [astrbot_plugin_music](https://github.com/Zhalslar/astrbot_plugin_music)；
 kimi
