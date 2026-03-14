@@ -7,28 +7,15 @@
     "name": "氢"
     "url": "https://github.com/hydrogen-francium"
   },
-  "license": "MIT",
   "homepage_url": "https://github.com/hydrogen-francium/maibot_music_plugin",
   "repository_url": "https://github.com/hydrogen-francium/maibot_music_plugin",
-  "keywords": ["音乐", "点歌", "网易云", "QQ音乐"],
-  "categories": ["娱乐", "音乐"],
+  "license": "MIT",
   "host_application": {
     "min_version": "0.10.0"
   },
-  "plugin_info": {
-    "is_built_in": false,
-    "plugin_type": "general",
-    "components": [
-      {
-        "type": "command",
-        "name": "music",
-        "description": "点歌命令"
-      },
-      {
-        "type": "command",
-        "name": "lyrics",
-        "description": "查歌词命令"
-      }
-    ]
-  }
+   "keywords": [
+    "音乐"
+  ],
+  "default_locale": "CN",
+  "locales_path": "_locales"    
 }
