@@ -1,5 +1,4 @@
 """发送器模块 - MaiBot版本"""
-import asyncio
 import base64
 import random
 from typing import TYPE_CHECKING, List, Optional
@@ -15,55 +14,6 @@ if TYPE_CHECKING:
     from .renderer import MusicRenderer
 
 logger = logging_api.get_logger("music_plugin")
-
-
-async def recall_message(component, message_id: str, display_message: str = "") -> bool:
-    """
-    撤回消息 - 参考撤回插件实现
-    
-    Args:
-        component: Command 或 Tool 组件实例
-        message_id: 要撤回的消息ID
-        display_message: 显示消息（可选）
-    
-    Returns:
-        bool: 是否撤回成功
-    """
-    if not message_id:
-        logger.warning("撤回消息失败：message_id 为空")
-        return False
-    
-    # 尝试多种命令名（适配不同平台）
-    DELETE_COMMANDS = ["DELETE_MSG", "delete_msg", "RECALL_MSG", "recall_msg"]
-    
-    for cmd in DELETE_COMMANDS:
-        try:
-            res = await component.send_command(
-                cmd,
-                {"message_id": str(message_id)},
-                display_message=display_message or "🎵 点歌超时，已自动撤回",
-                storage_message=False,
-            )
-            
-            # 检查结果
-            ok = False
-            if isinstance(res, bool):
-                ok = res
-            elif isinstance(res, dict):
-                if str(res.get("status", "")).lower() in ("ok", "success") or \
-                   res.get("retcode") == 0 or res.get("code") == 0:
-                    ok = True
-            
-            if ok:
-                logger.debug(f"消息撤回成功：message_id={message_id}, cmd={cmd}")
-                return True
-                
-        except Exception as e:
-            logger.debug(f"撤回命令 {cmd} 失败：{e}")
-            continue
-    
-    logger.warning(f"消息撤回失败：message_id={message_id}")
-    return False
 
 
 class MusicSender:

@@ -9,7 +9,6 @@ MaiBot 点歌插件 (轻量版)
 - 序号选择: 搜索后通过序号快速选择歌曲
 - 查歌词: 搜索并显示歌曲歌词
 - 多种发送模式: 音乐卡片、语音、文件、文本
-- 超时撤回: 选歌列表超时后自动撤回
 
 作者: 氢
 版本: 2.1.0
@@ -68,7 +67,6 @@ class MusicPluginConfig:
             ])
             self.enable_comments: bool = plugin.get_config("send.enable_comments", True)
             self.enable_lyrics: bool = plugin.get_config("send.enable_lyrics", False)
-            self.timeout_recall: bool = plugin.get_config("send.timeout_recall", True)
             
             # 网络配置 [network]
             self.proxy: str = plugin.get_config("network.proxy", "")
@@ -186,13 +184,8 @@ class MusicCommand(BaseCommand):
             song_list = "\n".join([title] + formatted_songs)
             message_text = f"{song_list}\n\n请回复序号选择歌曲，或回复「取消」取消点歌"
             
-            # 发送消息并尝试获取消息ID
-            send_result = await self.send_text(message_text)
-            message_id = None
-            if isinstance(send_result, dict):
-                message_id = send_result.get("message_id") or send_result.get("id")
-            elif hasattr(send_result, "message_id"):
-                message_id = send_result.message_id
+            # 发送消息
+            await self.send_text(message_text)
             
             # 存储等待选择状态
             chat_id = getattr(self, 'chat_id', '')
@@ -202,16 +195,7 @@ class MusicCommand(BaseCommand):
                 "songs": songs,
                 "player": player,
                 "timestamp": asyncio.get_event_loop().time(),
-                "message_id": message_id,  # 存储消息ID用于撤回
             }
-            
-            # 如果配置了超时撤回，设置定时任务
-            if plugin.cfg.timeout_recall and message_id:
-                timeout = plugin.cfg.timeout
-                logger.debug(f"设置 {timeout} 秒后撤回选歌消息: message_id={message_id}")
-                asyncio.create_task(
-                    self._recall_selection_message(plugin, selection_key, message_id, timeout)
-                )
             
             return True, "显示歌曲列表等待选择", True
             
@@ -219,27 +203,6 @@ class MusicCommand(BaseCommand):
             logger.error(f"点歌命令执行失败: {e}")
             await self.send_text(f"点歌失败: {str(e)}")
             return False, str(e), True
-    
-    async def _recall_selection_message(self, plugin, selection_key: str, message_id: str, timeout: int):
-        """超时后撤回选歌消息"""
-        from .core.sender import recall_message
-        
-        await asyncio.sleep(timeout)
-        
-        # 检查是否已被选择（如果已被选择则不撤回）
-        if selection_key not in plugin._pending_selections:
-            logger.debug(f"选歌已被处理，无需撤回: {selection_key}")
-            return
-        
-        # 撤回消息
-        success = await recall_message(self, message_id, display_message="🎵 点歌超时，已自动撤回")
-        if success:
-            logger.debug(f"选歌消息已撤回: {message_id}")
-        else:
-            logger.warning(f"选歌消息撤回失败: {message_id}")
-        
-        # 清理待选择状态
-        plugin._pending_selections.pop(selection_key, None)
 
 
 class MusicSelectCommand(BaseCommand):
@@ -408,11 +371,6 @@ class MusicPlugin(BasePlugin):
                 type=bool, 
                 default=False, 
                 description="是否启用歌词图片"
-            ),
-            "timeout_recall": ConfigField(
-                type=bool, 
-                default=True, 
-                description="超时后是否撤回选歌消息"
             ),
         },
         "network": {
