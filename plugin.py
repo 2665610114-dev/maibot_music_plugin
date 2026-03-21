@@ -9,9 +9,10 @@ MaiBot 点歌插件 (轻量版)
 - 序号选择: 搜索后通过序号快速选择歌曲
 - 查歌词: 搜索并显示歌曲歌词
 - 多种发送模式: 音乐卡片、语音、文件、文本
+- 超时撤回: 选歌列表超时后自动撤回
 
 作者: 氢
-版本: 2.1.0
+版本: 2.2.0
 """
 
 import asyncio
@@ -31,6 +32,8 @@ from .core.model import Song
 from .core.platform import BaseMusicPlayer, NetEaseMusic, NetEaseMusicNodeJS, TXQQMusic
 from .core.renderer import MusicRenderer
 from .core.sender import MusicSender
+from .core.recall_manager import recall_manager
+from .core.napcat_api import NapCatAPI
 
 # 获取日志器
 logger = logging_api.get_logger("music_plugin")
@@ -67,6 +70,12 @@ class MusicPluginConfig:
             ])
             self.enable_comments: bool = plugin.get_config("send.enable_comments", True)
             self.enable_lyrics: bool = plugin.get_config("send.enable_lyrics", False)
+            self.timeout_recall: bool = plugin.get_config("send.timeout_recall", True)
+            
+            # NapCat 配置 [napcat]
+            self.napcat_host: str = plugin.get_config("napcat.host", "127.0.0.1")
+            self.napcat_port: int = plugin.get_config("napcat.port", 9999)
+            self.napcat_token: str = plugin.get_config("napcat.token", "")
             
             # 网络配置 [network]
             self.proxy: str = plugin.get_config("network.proxy", "")
@@ -184,18 +193,85 @@ class MusicCommand(BaseCommand):
             song_list = "\n".join([title] + formatted_songs)
             message_text = f"{song_list}\n\n请回复序号选择歌曲，或回复「取消」取消点歌"
             
-            # 发送消息
-            await self.send_text(message_text)
+            # 使用 NapCatAPI 直接发送消息，获取真实的 message_id
+            # 参考 like_plugin 获取 user_id 和 chat_id
+            try:
+                user_id = str(self.message.message_info.user_info.user_id)
+            except Exception:
+                user_id = ''
+            
+            try:
+                # 尝试获取群号或私聊ID
+                chat_id = str(self.message.message_info.group_info.group_id) if hasattr(self.message.message_info, 'group_info') else user_id
+            except Exception:
+                chat_id = user_id
+            
+            logger.info(f"[MusicCommand] chat_id={chat_id}, user_id={user_id}")
+            
+            # 构造 OneBot 消息段
+            message_segments = [{"type": "text", "data": {"text": message_text}}]
+            
+            # 创建 NapCatAPI 实例
+            napcat = NapCatAPI(
+                host=plugin.cfg.napcat_host,
+                port=plugin.cfg.napcat_port,
+                token=plugin.cfg.napcat_token
+            )
+            
+            # 判断是群聊还是私聊
+            message_id = None
+            try:
+                # 优先判断群聊：chat_id 存在且不为空，且不等于 user_id
+                if chat_id and chat_id != '' and chat_id != user_id:
+                    # 群聊
+                    logger.debug(f"[MusicCommand] 使用 NapCatAPI 发送群消息到 {chat_id}")
+                    message_id = await napcat.send_group_msg(chat_id, message_segments)
+                elif user_id and user_id != '':
+                    # 私聊
+                    logger.debug(f"[MusicCommand] 使用 NapCatAPI 发送私聊消息到 {user_id}")
+                    message_id = await napcat.send_private_msg(user_id, message_segments)
+                else:
+                    # 无法确定聊天类型
+                    logger.warning(f"[MusicCommand] 无法确定聊天类型，chat_id={chat_id}, user_id={user_id}")
+                    await self.send_text(message_text)
+                
+                if message_id:
+                    logger.info(f"[MusicCommand] 通过 NapCatAPI 获取到真实 message_id: {message_id}")
+                else:
+                    logger.warning(f"[MusicCommand] NapCatAPI 未返回 message_id，回退到 send_text")
+                    await self.send_text(message_text)
+            except Exception as e:
+                logger.error(f"[MusicCommand] NapCatAPI 发送失败: {e}，回退到 send_text")
+                await self.send_text(message_text)
+                message_id = None
             
             # 存储等待选择状态
-            chat_id = getattr(self, 'chat_id', '')
-            user_id = getattr(self, 'user_id', '')
             selection_key = f"{chat_id}_{user_id}"
+            
+            # 确保 message_id 是整数
+            if message_id:
+                try:
+                    message_id = int(message_id)
+                except (ValueError, TypeError):
+                    logger.warning(f"[MusicCommand] message_id 转换为整数失败: {message_id}")
+                    message_id = None
+            
             plugin._pending_selections[selection_key] = {
                 "songs": songs,
                 "player": player,
                 "timestamp": asyncio.get_event_loop().time(),
+                "message_id": message_id,
             }
+            
+            # 如果配置了超时撤回，设置定时任务
+            if plugin.cfg.timeout_recall and message_id:
+                timeout = plugin.cfg.timeout
+                logger.info(f"[MusicCommand] 设置 {timeout} 秒后撤回选歌消息: message_id={message_id}")
+                await self._schedule_recall(plugin, selection_key, message_id, timeout, chat_id)
+            elif plugin.cfg.timeout_recall and not message_id:
+                logger.warning(f"[MusicCommand] 无法获取 message_id，撤回功能不可用")
+            else:
+                logger.debug(f"[MusicCommand] 跳过撤回设置: timeout_recall={plugin.cfg.timeout_recall}")
             
             return True, "显示歌曲列表等待选择", True
             
@@ -203,6 +279,21 @@ class MusicCommand(BaseCommand):
             logger.error(f"点歌命令执行失败: {e}")
             await self.send_text(f"点歌失败: {str(e)}")
             return False, str(e), True
+    
+    async def _schedule_recall(self, plugin, selection_key: str, message_id: str, timeout: int, chat_id: str):
+        """安排选歌列表撤回任务"""
+        logger.debug(f"[MusicCommand] 创建撤回任务: {selection_key}, message_id={message_id}")
+        
+        # 使用撤回管理器创建任务
+        recall_manager.create_recall_task(
+            selection_key=selection_key,
+            message_id=message_id,
+            chat_id=chat_id,
+            timeout_seconds=timeout,
+            napcat_host=plugin.cfg.napcat_host,
+            napcat_port=plugin.cfg.napcat_port,
+            napcat_token=plugin.cfg.napcat_token,
+        )
 
 
 class MusicSelectCommand(BaseCommand):
@@ -221,8 +312,18 @@ class MusicSelectCommand(BaseCommand):
                 return True, "插件未初始化", False
             
             selection = self.matched_groups.get("selection", "")
-            chat_id = getattr(self, 'chat_id', '')
-            user_id = getattr(self, 'user_id', '')
+            
+            # 参考 like_plugin 获取 user_id 和 chat_id
+            try:
+                user_id = str(self.message.message_info.user_info.user_id)
+            except Exception:
+                user_id = ''
+            
+            try:
+                chat_id = str(self.message.message_info.group_info.group_id) if hasattr(self.message.message_info, 'group_info') else user_id
+            except Exception:
+                chat_id = user_id
+            
             key = f"{chat_id}_{user_id}"
             
             # 检查是否有待选择的歌曲
@@ -240,6 +341,17 @@ class MusicSelectCommand(BaseCommand):
             
             # 取消选择
             if selection == "取消":
+                # 立即撤回选歌列表
+                logger.debug(f"[MusicSelectCommand] 用户取消点歌，准备撤回列表: {key}")
+                recall_result = await recall_manager.recall_immediately(
+                    key,
+                    napcat_host=plugin.cfg.napcat_host,
+                    napcat_port=plugin.cfg.napcat_port,
+                    napcat_token=plugin.cfg.napcat_token,
+                    reason="用户取消",
+                    send_timestamp=pending["timestamp"],
+                )
+                logger.debug(f"[MusicSelectCommand] 撤回结果: {recall_result}")
                 del plugin._pending_selections[key]
                 await self.send_text("已取消点歌")
                 return True, "取消选择", True
@@ -253,12 +365,24 @@ class MusicSelectCommand(BaseCommand):
                 await self.send_text(f"序号超出范围，请输入 1-{len(songs)} 之间的数字")
                 return True, "序号超出范围", True
             
-            # 发送选中的歌曲
-            selected_song = songs[index - 1]
-            await plugin.sender.send_song_command(self, player, selected_song)
+            # 立即撤回选歌列表
+            logger.debug(f"[MusicSelectCommand] 用户选择歌曲，准备撤回列表: {key}")
+            recall_result = await recall_manager.recall_immediately(
+                key,
+                napcat_host=plugin.cfg.napcat_host,
+                napcat_port=plugin.cfg.napcat_port,
+                napcat_token=plugin.cfg.napcat_token,
+                reason="用户选择",
+                send_timestamp=pending["timestamp"],
+            )
+            logger.debug(f"[MusicSelectCommand] 撤回结果: {recall_result}")
             
             # 清除待选择状态
             del plugin._pending_selections[key]
+            
+            # 发送选中的歌曲
+            selected_song = songs[index - 1]
+            await plugin.sender.send_song_command(self, player, selected_song)
             
             return True, f"发送歌曲: {selected_song.name}", True
             
@@ -329,7 +453,7 @@ class MusicPlugin(BasePlugin):
     plugin_name = "music_plugin"
     enable_plugin = True
     dependencies = []
-    python_dependencies = ["aiohttp", "aiofiles", "Pillow"]
+    python_dependencies = ["aiohttp", "aiofiles", "Pillow", "httpx"]
     config_file_name = "config.toml"
     
     # 配置Schema - 使用嵌套分组结构
@@ -371,6 +495,28 @@ class MusicPlugin(BasePlugin):
                 type=bool, 
                 default=False, 
                 description="是否启用歌词图片"
+            ),
+            "timeout_recall": ConfigField(
+                type=bool, 
+                default=True, 
+                description="超时后是否撤回选歌消息"
+            ),
+        },
+        "napcat": {
+            "host": ConfigField(
+                type=str, 
+                default="127.0.0.1", 
+                description="NapCat 服务地址（用于撤回消息）"
+            ),
+            "port": ConfigField(
+                type=int, 
+                default=9999, 
+                description="NapCat 服务端口（MaiBot 默认使用 9999）"
+            ),
+            "token": ConfigField(
+                type=str, 
+                default="", 
+                description="NapCat 认证 Token（留空表示不需要）"
             ),
         },
         "network": {
@@ -456,6 +602,9 @@ class MusicPlugin(BasePlugin):
         """插件终止"""
         global _plugin_instance
         try:
+            # 清理撤回任务
+            recall_manager.cleanup()
+            
             if self.downloader:
                 await self.downloader.close()
             for player in self.players:
